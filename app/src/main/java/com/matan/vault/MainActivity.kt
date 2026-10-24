@@ -59,6 +59,9 @@ import com.matan.vault.ui.HomeScreen
 import com.matan.vault.ui.Navy
 import com.matan.vault.ui.NavyDeep
 import com.matan.vault.ui.PageViewer
+import com.matan.vault.ui.PasswordDetailScreen
+import com.matan.vault.ui.PasswordEditScreen
+import com.matan.vault.ui.PasswordsScreen
 import com.matan.vault.ui.TimelineScreen
 import com.matan.vault.ui.VaultTheme
 import com.matan.vault.ui.rememberSources
@@ -68,11 +71,36 @@ class MainActivity : FragmentActivity() {
     companion object {
         const val EXTRA_DOC_ID = "doc_id"
         private const val RELOCK_AFTER_MS = 60_000L
+        /** showing or copying a password needs a fingerprint within this window */
+        private const val SECRET_GRACE_MS = 90_000L
     }
 
     private val vm: VaultViewModel by viewModels()
     private val locked = mutableStateOf(true)
     private var stoppedAt = 0L
+    private var lastAuthAt = 0L
+
+    /** Runs [action] only after a fresh fingerprint / screen-lock check (or a very recent one). */
+    fun requireRecentAuth(reason: String, action: () -> Unit) {
+        val auth = BIOMETRIC_WEAK or DEVICE_CREDENTIAL
+        if (BiometricManager.from(this).canAuthenticate(auth) != BiometricManager.BIOMETRIC_SUCCESS ||
+            (lastAuthAt != 0L && SystemClock.elapsedRealtime() - lastAuthAt < SECRET_GRACE_MS)
+        ) {
+            action(); return
+        }
+        BiometricPrompt(this, androidx.core.content.ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                lastAuthAt = SystemClock.elapsedRealtime()
+                action()
+            }
+        }).authenticate(
+            BiometricPrompt.PromptInfo.Builder()
+                .setTitle(reason)
+                .setSubtitle("אימות לפני הצגת מידע רגיש")
+                .setAllowedAuthenticators(auth)
+                .build()
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -116,6 +144,7 @@ class MainActivity : FragmentActivity() {
 
     fun lockNow() {
         locked.value = true
+        lastAuthAt = 0L
     }
 
     private fun handleIntent(intent: Intent?) {
@@ -144,6 +173,7 @@ class MainActivity : FragmentActivity() {
         }
         val prompt = BiometricPrompt(this, androidx.core.content.ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                lastAuthAt = SystemClock.elapsedRealtime()
                 locked.value = false
             }
         })
@@ -182,6 +212,8 @@ private fun LockScreen(onUnlock: () -> Unit) {
 private fun AppNav(vm: VaultViewModel) {
     val nav = rememberNavController()
     val documents by vm.documents.collectAsState()
+    val credentials by vm.credentials.collectAsState()
+    val audit by vm.audit.collectAsState()
     val covers by vm.covers.collectAsState()
     val edit by vm.edit.collectAsState()
     val pendingShare by vm.pendingShare.collectAsState()
@@ -226,6 +258,9 @@ private fun AppNav(vm: VaultViewModel) {
             HomeScreen(
                 documents = documents,
                 covers = covers,
+                credentials = credentials,
+                onPasswords = { nav.navigate("passwords") },
+                onOpenPassword = { nav.navigate("password/$it") },
                 importing = edit?.busy == true,
                 snackbar = snackbar,
                 onOpen = { nav.navigate("detail/$it") },
@@ -279,6 +314,41 @@ private fun AppNav(vm: VaultViewModel) {
                 id = entry.arguments?.getLong("id") ?: 0L,
                 start = entry.arguments?.getInt("page") ?: 0,
                 onBack = { nav.popBackStack() },
+            )
+        }
+        composable("passwords") {
+            PasswordsScreen(
+                vm = vm,
+                credentials = credentials,
+                audit = audit,
+                onOpen = { nav.navigate("password/$it") },
+                onAdd = { nav.navigate("password_edit/0") },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable("password/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) { entry ->
+            val id = entry.arguments?.getLong("id") ?: 0L
+            PasswordDetailScreen(
+                vm = vm,
+                id = id,
+                reused = id in audit.reused,
+                weak = id in audit.weak,
+                onEdit = {
+                    activity?.requireRecentAuth("עריכת סיסמה") { nav.navigate("password_edit/$id") { launchSingleTop = true } }
+                },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable("password_edit/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) { entry ->
+            val id = entry.arguments?.getLong("id") ?: 0L
+            PasswordEditScreen(
+                vm = vm,
+                id = id,
+                onDone = { savedId ->
+                    nav.popBackStack()
+                    if (id == 0L) nav.navigate("password/$savedId") { launchSingleTop = true }
+                },
+                onCancel = { nav.popBackStack() },
             )
         }
         composable("timeline") {

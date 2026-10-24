@@ -26,6 +26,8 @@ import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Timeline
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Password
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -54,6 +56,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.matan.vault.data.Category
+import com.matan.vault.data.CredentialEntity
 import com.matan.vault.data.DocumentEntity
 import com.matan.vault.data.ExpiryState
 
@@ -61,6 +64,9 @@ import com.matan.vault.data.ExpiryState
 fun HomeScreen(
     documents: List<DocumentEntity>,
     covers: Map<Long, String>,
+    credentials: List<CredentialEntity>,
+    onPasswords: () -> Unit,
+    onOpenPassword: (Long) -> Unit,
     importing: Boolean,
     snackbar: SnackbarHostState,
     onOpen: (Long) -> Unit,
@@ -90,6 +96,7 @@ fun HomeScreen(
         .sortedBy { it.expiryDate }
     val favorites = active.filter { it.favorite }
     val browsing = q.isEmpty() && filter == "ALL" && owner.isEmpty()
+    val matchingPasswords = if (q.isEmpty()) emptyList() else credentials.filter { it.matches(q) }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -143,6 +150,16 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 )
             }
+            if (browsing) {
+                item { PasswordsEntry(credentials.size, onPasswords) }
+            }
+            if (matchingPasswords.isNotEmpty()) {
+                item { SectionTitle("סיסמאות") }
+                items(matchingPasswords, key = { "pw" + it.id }) { c ->
+                    CredentialRow(c, reused = false, weak = false, onClick = { onOpenPassword(c.id) })
+                }
+                if (visible.isNotEmpty()) item { SectionTitle("מסמכים") }
+            }
             if (importing) {
                 item {
                     Column(Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
@@ -195,7 +212,7 @@ fun HomeScreen(
                 }
             }
             items(visible, key = { it.id }) { d -> DocRow(d, covers[d.id]) { onOpen(d.id) } }
-            if (documents.isNotEmpty() && visible.isEmpty()) {
+            if (documents.isNotEmpty() && visible.isEmpty() && matchingPasswords.isEmpty()) {
                 item {
                     Text(
                         "לא נמצאו מסמכים",
@@ -204,6 +221,33 @@ fun HomeScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun PasswordsEntry(count: Int, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Navy),
+    ) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(NavyDeep),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Outlined.Password, null, tint = Gold) }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text("סיסמאות", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                Text(
+                    if (count == 0) "שמירה מוצפנת של סיסמאות לאתרים, בנק ומייל" else "$count שמורות · מוצפנות",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.72f),
+                )
+            }
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = Color.White.copy(alpha = 0.8f))
         }
     }
 }

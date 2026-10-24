@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.matan.vault.data.Category
+import com.matan.vault.data.CredentialEntity
 import com.matan.vault.data.DocumentEntity
 import com.matan.vault.data.PageEntity
 import com.matan.vault.data.VaultDatabase
@@ -12,6 +13,9 @@ import com.matan.vault.ocr.DocParser
 import com.matan.vault.ocr.Extracted
 import com.matan.vault.ocr.Importer
 import com.matan.vault.security.FileStore
+import com.matan.vault.security.PasswordTools
+import com.matan.vault.security.SecretBox
+import com.matan.vault.security.Strength
 import com.matan.vault.share.ShareHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,10 +39,13 @@ data class EditState(
     val busy: Boolean = false,
 )
 
+data class PasswordAudit(val reused: Set<Long> = emptySet(), val weak: Set<Long> = emptySet())
+
 class VaultViewModel(app: Application) : AndroidViewModel(app) {
     private val db = VaultDatabase.get(app)
     private val docs = db.documents()
     private val pagesDao = db.pages()
+    private val creds = db.credentials()
     private val ctx get() = getApplication<Application>()
 
     val documents: StateFlow<List<DocumentEntity>> =
@@ -56,6 +63,21 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
     val pendingOpenDoc = MutableStateFlow<Long?>(null)
 
     val message = MutableStateFlow<String?>(null)
+
+    val credentials: StateFlow<List<CredentialEntity>> =
+        creds.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Which saved passwords are reused or weak. Computed in memory only, never stored. */
+    val audit: StateFlow<PasswordAudit> = creds.observeAll().map { list ->
+        withContext(Dispatchers.Default) {
+            val plain = list.filter { it.secret.isNotEmpty() }
+                .associate { it.id to runCatching { SecretBox.decrypt(it.secret) }.getOrDefault("") }
+                .filterValues { it.isNotEmpty() }
+            val reused = plain.entries.groupBy({ it.value }, { it.key }).values.filter { it.size > 1 }.flatten().toSet()
+            val weak = plain.filterValues { PasswordTools.strength(it).score <= Strength.WEAK.score }.keys
+            PasswordAudit(reused, weak)
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, PasswordAudit())
 
     fun observeDoc(id: Long) = docs.observe(id)
     fun observePages(id: Long) = pagesDao.observeFor(id)
@@ -215,4 +237,48 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
                 message.value = "השיתוף נכשל: ${e.message}"
             }
         }
+
+    // ---------- passwords ----------
+
+    fun observeCredential(id: Long) = creds.observe(id)
+
+    suspend fun reveal(stored: String): String = withContext(Dispatchers.Default) {
+        runCatching { SecretBox.decrypt(stored) }.getOrElse {
+            message.value = "לא הצלחתי לפענח"
+            ""
+        }
+    }
+
+    suspend fun credential(id: Long): CredentialEntity? = creds.get(id)
+
+    fun saveCredential(
+        base: CredentialEntity,
+        password: String,
+        notes: String,
+        onSaved: (Long) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val id = withContext(Dispatchers.IO) {
+                val old = if (base.id != 0L) creds.get(base.id) else null
+                val oldPw = old?.let { runCatching { SecretBox.decrypt(it.secret) }.getOrDefault("") }
+                val now = System.currentTimeMillis()
+                val c = base.copy(
+                    title = base.title.trim().ifBlank { base.url.trim().ifBlank { base.kindOf().label } },
+                    username = base.username.trim(),
+                    url = base.url.trim(),
+                    secret = SecretBox.encrypt(password),
+                    secureNotes = SecretBox.encrypt(notes),
+                    updatedAt = if (old == null || oldPw != password) now else old.updatedAt,
+                )
+                if (old == null) creds.insert(c.copy(id = 0, createdAt = now)) else {
+                    creds.update(c); c.id
+                }
+            }
+            onSaved(id)
+        }
+    }
+
+    fun toggleFavorite(c: CredentialEntity) = viewModelScope.launch { creds.update(c.copy(favorite = !c.favorite)) }
+
+    fun delete(c: CredentialEntity) = viewModelScope.launch(Dispatchers.IO) { creds.delete(c) }
 }
