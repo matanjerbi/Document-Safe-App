@@ -11,6 +11,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -41,6 +43,7 @@ import androidx.compose.material.icons.outlined.AccountBalance
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Gavel
@@ -104,6 +107,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.CompositionLocalProvider
 import com.matan.vault.MainActivity
+import com.matan.vault.ImportResult
 import com.matan.vault.PasswordAudit
 import com.matan.vault.VaultViewModel
 import com.matan.vault.data.CredentialEntity
@@ -227,12 +231,22 @@ fun PasswordsScreen(
     val context = LocalContext.current
     val activity = context.findActivity() as? MainActivity
     val scope = rememberCoroutineScope()
+    var showImportHelp by rememberSaveable { mutableStateOf(false) }
+    var importing by remember { mutableStateOf(false) }
+    var importResult by remember { mutableStateOf<ImportResult?>(null) }
+    val pickCsv = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            importing = true
+            vm.importCredentials(uri) { importing = false; importResult = it }
+        }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("סיסמאות") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "חזרה") } },
+                actions = { IconButton(onClick = { showImportHelp = true }) { Icon(Icons.Outlined.Download, "ייבוא סיסמאות מגוגל") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
@@ -248,7 +262,7 @@ fun PasswordsScreen(
     ) { pad ->
         LazyColumn(Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(bottom = 110.dp)) {
             if (credentials.isEmpty()) {
-                item { PasswordsEmpty() }
+                item { PasswordsEmpty(onImport = { showImportHelp = true }) }
                 return@LazyColumn
             }
             item {
@@ -330,10 +344,67 @@ fun PasswordsScreen(
             }
         }
     }
+
+    if (showImportHelp) {
+        AlertDialog(
+            onDismissRequest = { showImportHelp = false },
+            title = { Text("ייבוא סיסמאות מגוגל") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "1. בטלפון: הגדרות ← Google ← מנהל הסיסמאות (או באתר passwords.google.com).\n" +
+                            "2. גלגל השיניים (הגדרות) ← ״ייצוא סיסמאות״ ← אישור עם טביעת אצבע.\n" +
+                            "3. שמור את הקובץ Google Passwords.csv.\n" +
+                            "4. כאן: ״בחר קובץ״ ובחר את הקובץ.\n\n" +
+                            "סיסמאות שכבר קיימות לא ישוכפלו, ואם הסיסמה השתנתה — היא תעודכן. עובד גם עם קבצי CSV מכרום, Samsung Pass, Bitwarden ועוד.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "חשוב: הקובץ שומר את כל הסיסמאות כטקסט גלוי. אחרי הייבוא מחק אותו מההורדות (וגם מהאשפה).",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Bad,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showImportHelp = false
+                    pickCsv.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain", "application/vnd.ms-excel", "application/octet-stream"))
+                }) { Text("בחר קובץ") }
+            },
+            dismissButton = { TextButton(onClick = { showImportHelp = false }) { Text("ביטול") } },
+        )
+    }
+    if (importing) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("מייבא ומצפין…") },
+            text = { LinearProgressIndicator(Modifier.fillMaxWidth()) },
+            confirmButton = {},
+        )
+    }
+    importResult?.let { r ->
+        AlertDialog(
+            onDismissRequest = { importResult = null },
+            title = { Text(if (r.error == null) "הייבוא הסתיים" else "הייבוא נכשל") },
+            text = {
+                Text(
+                    r.error ?: buildString {
+                        append("נוספו ${r.added} סיסמאות")
+                        if (r.updated > 0) append("\nעודכנו ${r.updated}")
+                        if (r.skipped > 0) append("\nדולגו ${r.skipped} שכבר היו שמורות")
+                        append("\n\nעכשיו מחק את קובץ ה-CSV מהטלפון — הוא לא מוצפן.")
+                    },
+                )
+            },
+            confirmButton = { TextButton(onClick = { importResult = null }) { Text("הבנתי") } },
+        )
+    }
 }
 
 @Composable
-private fun PasswordsEmpty() {
+private fun PasswordsEmpty(onImport: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             Modifier.size(88.dp).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.primaryContainer),
@@ -347,6 +418,12 @@ private fun PasswordsEmpty() {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(20.dp))
+        FilledTonalButton(onClick = onImport) {
+            Icon(Icons.Outlined.Download, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("ייבוא כל הסיסמאות מגוגל")
+        }
     }
 }
 

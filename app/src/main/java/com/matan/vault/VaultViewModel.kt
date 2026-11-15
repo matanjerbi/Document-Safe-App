@@ -12,6 +12,7 @@ import com.matan.vault.data.VaultDatabase
 import com.matan.vault.ocr.DocParser
 import com.matan.vault.ocr.Extracted
 import com.matan.vault.ocr.Importer
+import com.matan.vault.security.CsvImport
 import com.matan.vault.security.FileStore
 import com.matan.vault.security.PasswordTools
 import com.matan.vault.security.SecretBox
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -38,6 +40,8 @@ data class EditState(
     val extracted: Extracted? = null,
     val busy: Boolean = false,
 )
+
+data class ImportResult(val added: Int = 0, val updated: Int = 0, val skipped: Int = 0, val error: String? = null)
 
 data class PasswordAudit(val reused: Set<Long> = emptySet(), val weak: Set<Long> = emptySet())
 
@@ -275,6 +279,55 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             onSaved(id)
+        }
+    }
+
+    /**
+     * Imports a passwords CSV (Google Password Manager export and similar). Existing entries are matched by
+     * site + username: identical ones are skipped, ones whose password changed are updated, the rest are added.
+     */
+    fun importCredentials(uri: Uri, onDone: (ImportResult) -> Unit) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val text = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                        ?: throw CsvImport.FormatException("לא הצלחתי לקרוא את הקובץ")
+                    val logins = CsvImport.parse(text)
+                    fun key(url: String, title: String, user: String) =
+                        (CsvImport.host(url).ifBlank { title.trim().lowercase() }) + "|" + user.trim().lowercase()
+                    val existing = creds.observeAll().first().associateBy { key(it.url, it.title, it.username) }.toMutableMap()
+                    var added = 0; var updated = 0; var skipped = 0
+                    val now = System.currentTimeMillis()
+                    for (l in logins) {
+                        val k = key(l.url, l.title, l.username)
+                        val old = existing[k]
+                        if (old == null) {
+                            val c = CredentialEntity(
+                                title = l.title.ifBlank { "ללא שם" },
+                                kind = CsvImport.guessKind(l.url, l.title).name,
+                                username = l.username,
+                                url = l.url,
+                                secret = SecretBox.encrypt(l.password),
+                                secureNotes = SecretBox.encrypt(l.note),
+                                createdAt = now, updatedAt = now,
+                            )
+                            existing[k] = c.copy(id = creds.insert(c))
+                            added++
+                        } else {
+                            val oldPw = runCatching { SecretBox.decrypt(old.secret) }.getOrDefault("")
+                            if (oldPw == l.password) { skipped++; continue }
+                            val oldNotes = runCatching { SecretBox.decrypt(old.secureNotes) }.getOrDefault("")
+                            val notes = if (l.note.isBlank() || oldNotes.contains(l.note)) oldNotes
+                                else listOf(oldNotes, l.note).filter { it.isNotBlank() }.joinToString("\n")
+                            val c = old.copy(secret = SecretBox.encrypt(l.password), secureNotes = SecretBox.encrypt(notes), updatedAt = now)
+                            creds.update(c); existing[k] = c
+                            updated++
+                        }
+                    }
+                    ImportResult(added, updated, skipped)
+                }.getOrElse { ImportResult(error = (it as? CsvImport.FormatException)?.message ?: "הקובץ לא בפורמט שאני מכיר") }
+            }
+            onDone(result)
         }
     }
 
